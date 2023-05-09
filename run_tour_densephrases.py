@@ -347,7 +347,6 @@ def do_test_query(args, mips, query_encoder=None, tokenizer=None, q_ids=None, qu
         raise NotImplementedError
     elif not args.is_kilt:
         new_args = copy.deepcopy(args)
-        new_args.top_k = args.pred_top_k
         new_args.save_pred = False
         new_args.aggregate = True
         em_top1, _, em_topk, _ = evaluate(new_args, mips, query_encoder=query_encoder,
@@ -372,7 +371,6 @@ def do_test_query(args, mips, query_encoder=None, tokenizer=None, q_ids=None, qu
         raise NotImplementedError
     elif not args.is_kilt:
         new_args = copy.deepcopy(args)
-        new_args.top_k = args.pred_top_k
         new_args.save_pred = False
         new_args.aggregate = True
         em_top1, f1_top1, em_topk, f1_topk = evaluate(new_args, mips, query_encoder=query_encoder,
@@ -437,7 +435,6 @@ if __name__ == '__main__':
     options.parser.add_argument("--pseudo_labeler_p", type=float, default=0.5)
     options.parser.add_argument("--pseudo_labeler_temp", type=float, default=1.0)
     options.parser.add_argument("--top1_earlystop", action='store_true')
-    options.parser.add_argument("--pred_top_k", type=int, default=10)
     options.parser.add_argument("--no_eval_before_tqr", action='store_true')
     args = options.parse()
 
