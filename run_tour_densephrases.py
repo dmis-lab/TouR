@@ -9,8 +9,7 @@ from tqdm import tqdm
 from DensePhrases.densephrases.utils.single_utils import load_encoder
 from DensePhrases.densephrases.utils.open_utils import load_phrase_index, get_query2vec, load_qa_pairs
 from DensePhrases.densephrases.utils.eval_utils import (
-    drqa_exact_match_score, drqa_regex_match_score,
-    drqa_metric_max_over_ground_truths
+    drqa_exact_match_score, drqa_regex_match_score
 )
 from DensePhrases.eval_phrase_retrieval import (
     evaluate_results,
@@ -165,7 +164,7 @@ def update_query_vec(
     query_vecs = query_vecs.float()
 
     # Compute query embedding
-    query_start, query_end = query_vecs.split(query_vecs.shape[-1] // 2, dim=2)
+    query_start, query_end = query_vecs.split(query_vecs.shape[-1] // 2, dim=1)
 
     # Start/end dense logits
     # [batch_size, topk]
@@ -250,12 +249,6 @@ def test_query_vec(args, mips, query_vecs, data, pseudo_label_fct=None):
         else:
             tgts = [[tgt_ for tgt_ in tgt if tgt_ is not None] for tgt in tgts]
         
-        if args.eval_psg:
-            raise NotImplementedError
-        else:
-            keys = [f"{pg['title']};{pg['start_pos']};{pg['end_pos']}" for pg in phrase_groups[0]]
-        
-
         if is_soft_label: # prepare it for early stop
             # top p labeling (Assumption: single instance)
             mml_tgts = torch.Tensor(tgts).squeeze(0)
@@ -276,19 +269,19 @@ def test_query_vec(args, mips, query_vecs, data, pseudo_label_fct=None):
         evs_t = torch.Tensor(evs).to(device)
         tgts_t = [torch.Tensor(tgt).to(device) for tgt in tgts]
         
-        # step3: TQR condition
+        # step3: TouR condition
         # Early-stop if top 1 prediction is positive
         # Otherwise, update query
         if args.top1_earlystop:
             if not is_soft_label and ((0. in tgts_t[0]) or (len(tgts_t[0]) == 0)):
-                logger.info(
-                    f"Ep {ep_idx+1} Early stop -- targets: {tgts_t[0]}"
-                )
+                # logger.info(
+                #     f"Ep {ep_idx+1} Early stop -- targets: {tgts_t[0]}"
+                # )
                 break
             elif is_soft_label and ((0. in mml_tgts) or (len(mml_tgts) == 0)):
-                logger.info(
-                    f"Ep {ep_idx+1} Early stop -- targets: {mml_tgts}"
-                )
+                # logger.info(
+                #     f"Ep {ep_idx+1} Early stop -- targets: {mml_tgts}"
+                # )
                 break
             
         # step4: train query vector that doesn't meet prf stop condition
@@ -313,14 +306,14 @@ def test_query_vec(args, mips, query_vecs, data, pseudo_label_fct=None):
         else:
             torch.nn.utils.clip_grad_norm_(query_vecs, args.max_grad_norm)
         
-        if is_soft_label:
-            logger.info(
-                f"Ep {ep_idx+1} Tr loss: {loss.mean().item():.2f} targets: {mml_tgts} LR: {scheduler.get_last_lr()}"
-            )
-        else:
-            logger.info(
-                f"Ep {ep_idx+1} Tr loss: {loss.mean().item():.2f} targets: {tgts_t[0]} LR: {scheduler.get_last_lr()}"
-            )
+        # if is_soft_label:
+        #     logger.info(
+        #         f"Ep {ep_idx+1} Tr loss: {loss.mean().item():.2f} targets: {mml_tgts} LR: {scheduler.get_last_lr()}"
+        #     )
+        # else:
+        #     logger.info(
+        #         f"Ep {ep_idx+1} Tr loss: {loss.mean().item():.2f} targets: {tgts_t[0]} LR: {scheduler.get_last_lr()}"
+        #     )
         
         optimizer.step()
         scheduler.step()
@@ -357,13 +350,11 @@ def do_test_query(args, mips, query_encoder=None, tokenizer=None, q_ids=None, qu
         new_args.top_k = args.pred_top_k
         new_args.save_pred = False
         new_args.aggregate = True
-        exact_match_top1, _, exact_match_topk, _ = evaluate(new_args, mips, query_encoder=query_encoder,
+        em_top1, _, em_topk, _ = evaluate(new_args, mips, query_encoder=query_encoder,
                                                             tokenizer=tokenizer, query_vec=query_vecs)
-
-        em_top1 = exact_match_top1
-        em_topk = exact_match_topk
     else:
         raise NotImplementedError
+    
     # update query vector
     updated_query_vecs = np.copy(query_vecs)
     for i in tqdm(range(0, len(q_ids), batch_size)):
@@ -384,14 +375,9 @@ def do_test_query(args, mips, query_encoder=None, tokenizer=None, q_ids=None, qu
         new_args.top_k = args.pred_top_k
         new_args.save_pred = False
         new_args.aggregate = True
-        result = evaluate(new_args, mips, query_encoder=query_encoder,
-                                tokenizer=tokenizer, query_vec=query_vecs)
+        em_top1, f1_top1, em_topk, f1_topk = evaluate(new_args, mips, query_encoder=query_encoder,
+                                                      tokenizer=tokenizer, query_vec=query_vecs)
 
-
-        em_top1 = result['em_top1']
-        f1_top1 = result['f1_top1']
-        em_topk = result['em_topk']
-        f1_topk = result['f1_topk']
         logger.info(f"Acc={em_top1:.2f} | F1={f1_top1:.2f}")
         logger.info(f"Acc@{new_args.top_k}={em_topk:.2f} | F1@{new_args.top_k}={f1_topk:.2f}")
     else:
