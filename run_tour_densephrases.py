@@ -6,16 +6,18 @@ import logging
 import copy
 
 from tqdm import tqdm
-from densephrases.utils.single_utils import load_encoder
-from densephrases.utils.open_utils import load_phrase_index, get_query2vec, load_qa_pairs
-from densephrases.utils.eval_utils import (
+from DensePhrases.densephrases.utils.single_utils import load_encoder
+from DensePhrases.densephrases.utils.open_utils import load_phrase_index, get_query2vec, load_qa_pairs
+from DensePhrases.densephrases.utils.eval_utils import (
     drqa_exact_match_score, drqa_regex_match_score,
     drqa_metric_max_over_ground_truths
 )
-from eval_phrase_retrieval import evaluate
-from densephrases import Options
+from DensePhrases.eval_phrase_retrieval import (
+    evaluate_results,
+    embed_all_query
+)
+from DensePhrases.densephrases import Options
 from cross_encoder import CrossEncoder
-from eval_phrase_retrieval import embed_all_query
 from torch.nn.functional import softmax
 from numpy.random import default_rng
 rng = default_rng()
@@ -27,8 +29,6 @@ from torch.optim import SGD
 logging.basicConfig(format='%(asctime)s - %(levelname)s - %(name)s -   %(message)s', datefmt='%m/%d/%Y %H:%M:%S',
                     level=logging.INFO)
 logger = logging.getLogger(__name__)
-
-
 
 def get_top_phrases(mips, q_ids, questions, answers, titles, query_encoder, tokenizer, batch_size, args):
     # Search
@@ -71,7 +71,7 @@ def get_top_phrases_query_vec(mips, questions, query_vecs, args):
     return outs
 
 
-def annotate_phrase_vecs(mips, q_ids, questions, answers, titles, phrase_groups, args, label_strategy='gold',
+def annotate_phrase_vecs(mips, q_ids, questions, answers, titles, phrase_groups, args,
                          pseudo_label_fct=None, is_skips=[]):
     if len(is_skips) == 0:
         is_skips = [False] * len(questions)
@@ -131,25 +131,13 @@ def annotate_phrase_vecs(mips, q_ids, questions, answers, titles, phrase_groups,
             drqa_regex_match_score if args.regex or ('trec' in q_id.lower()) else drqa_exact_match_score for q_id in
             q_ids
         ]
-        if label_strategy == 'gold':
-            targets = [
-                [drqa_metric_max_over_ground_truths(match_fn, phrase['answer'], answer_set) for phrase in phrase_group]
-                for phrase_group, answer_set, match_fn in zip(phrase_groups, answers, match_fns)
-            ]
-        elif label_strategy == 'pseudo':
-            # phrase.keys(): dict_keys(['context', 'title', 'doc_idx', 'start_pos', 'end_pos', 'start_idx', 'end_idx', 'score', 'start_vec', 'end_vec', 'answer'])
-            targets = [pseudo_label_fct(phrase_group, question, is_skip, is_psg=is_psg) for phrase_group, question, is_skip in
-                       zip(phrase_groups, questions, is_skips)]
-            
-            targets = [target[0] for target in targets]
-        elif label_strategy.startswith('top'):
-            K = len(phrase_groups[0])
-            k = int(label_strategy.replace("top",""))
-            target = np.zeros(K)
-            target[:k] = 1
-            targets = [target for phrase_group in phrase_groups]
-        else:
-            raise NotImplementedError('invalid strategy')
+
+        # phrase.keys(): dict_keys(['context', 'title', 'doc_idx', 'start_pos', 'end_pos', 'start_idx', 'end_idx', 'score', 'start_vec', 'end_vec', 'answer'])
+        targets = [pseudo_label_fct(phrase_group, question, is_skip, is_psg=is_psg) for phrase_group, question, is_skip in
+                    zip(phrase_groups, questions, is_skips)]
+        
+        targets = [target[0] for target in targets]
+        
         # pass p_targets when it is a soft label
         if targets[0].dtype == 'float32':
             pass
@@ -166,7 +154,6 @@ def update_query_vec(
         query_vecs,
         start_vecs=None, end_vecs=None,
         targets=None, is_soft_label=False, 
-        student_temp=1.0
 ):
 
     # Skip if no targets for phrases
@@ -192,9 +179,9 @@ def update_query_vec(
     if is_soft_label:
         kl_loss_fct = torch.nn.KLDivLoss(reduction="batchmean")
         targets = torch.softmax(torch.stack(targets), dim=-1)
-        log_probs = torch.log_softmax(logits/student_temp, dim=-1)
-        start_log_probs = torch.log_softmax(start_logits/student_temp, dim=-1)
-        end_log_probs = torch.log_softmax(end_logits/student_temp, dim=-1)
+        log_probs = torch.log_softmax(logits, dim=-1)
+        start_log_probs = torch.log_softmax(start_logits, dim=-1)
+        end_log_probs = torch.log_softmax(end_logits, dim=-1)
         loss = kl_loss_fct(log_probs, targets)
         start_loss = kl_loss_fct(start_log_probs, targets)
         end_loss = kl_loss_fct(end_log_probs, targets)
@@ -223,7 +210,6 @@ def update_query_vec(
         loss = loss + start_loss + end_loss
     return loss
 
-
 def test_query_vec(args, mips, query_vecs, data, pseudo_label_fct=None):
     is_soft_label = args.pseudo_labeler_type == 'soft'
     assert len(query_vecs) == 1 # Ensure to be instance-level optimzation
@@ -238,7 +224,7 @@ def test_query_vec(args, mips, query_vecs, data, pseudo_label_fct=None):
     q_ids, questions, _, titles = data
 
     # Train arguments
-    args.per_device_eval_batch_size = int(args.per_device_eval_batch_size / args.gradient_accumulation_steps)
+    args.per_device_train_batch_size = int(args.per_device_train_batch_size / args.gradient_accumulation_steps)
 
     for ep_idx in range(int(args.num_train_epochs)):
         # step1: get top phrases using query vec
@@ -247,16 +233,14 @@ def test_query_vec(args, mips, query_vecs, data, pseudo_label_fct=None):
         # step2: annotate relevance using relevance labeler
         is_skips = np.array([0]*len(questions))
         is_skips[list(skip_indexes)] = 1
-        label_strategy = args.label_strategy if args.label_strategy.startswith('top') else 'pseudo'
         
-        svs, evs, tgts, p_tgts = annotate_phrase_vecs(mips, 
+        svs, evs, tgts, _ = annotate_phrase_vecs(mips, 
                                             q_ids, 
                                             questions, 
                                             None, 
                                             titles, 
                                             phrase_groups, 
                                             args, 
-                                            label_strategy='none' if pseudo_label_fct is None else label_strategy, 
                                             pseudo_label_fct=pseudo_label_fct,
                                             is_skips=is_skips
                                             )  
@@ -313,8 +297,7 @@ def test_query_vec(args, mips, query_vecs, data, pseudo_label_fct=None):
             start_vecs=svs_t,
             end_vecs=evs_t,
             targets=tgts_t,
-            is_soft_label=is_soft_label,
-            student_temp=args.student_temp
+            is_soft_label=is_soft_label
         )
         optimizer.zero_grad()
         if args.fp16:
@@ -358,16 +341,11 @@ def do_test_query(args, mips, query_encoder=None, tokenizer=None, q_ids=None, qu
         pseudo_labeler_p=args.pseudo_labeler_p,
         pseudo_labeler_temp=args.pseudo_labeler_temp,
         use_cuda=args.cuda,
-        no_title=args.no_title, 
-        title_delimiter=args.title_delimiter,
-        input_type=args.input_type,
-        task=task,
-        cache_path=args.ce_cache_path,
-        overwrite_cache=args.overwrite_cache
+        task=task
     )
     pseudo_label_fct = ce_model.do_labeling
 
-    batch_size = args.per_device_eval_batch_size
+    batch_size = args.per_device_train_batch_size
 
     logger.info(f"Before applying TouR on {len(questions)} questions")
     if args.no_eval_before_tqr:
@@ -379,11 +357,11 @@ def do_test_query(args, mips, query_encoder=None, tokenizer=None, q_ids=None, qu
         new_args.top_k = args.pred_top_k
         new_args.save_pred = False
         new_args.aggregate = True
-        result = evaluate(new_args, mips, query_encoder=query_encoder,
-                                            tokenizer=tokenizer, query_vec=query_vecs)
+        exact_match_top1, _, exact_match_topk, _ = evaluate(new_args, mips, query_encoder=query_encoder,
+                                                            tokenizer=tokenizer, query_vec=query_vecs)
 
-        em_top1 = result['em_top1']
-        em_topk = result['em_topk']
+        em_top1 = exact_match_top1
+        em_topk = exact_match_topk
     else:
         raise NotImplementedError
     # update query vector
@@ -418,7 +396,47 @@ def do_test_query(args, mips, query_encoder=None, tokenizer=None, q_ids=None, qu
         logger.info(f"Acc@{new_args.top_k}={em_topk:.2f} | F1@{new_args.top_k}={f1_topk:.2f}")
     else:
         raise NotImplementedError
-    
+
+def evaluate(args, mips=None, query_encoder=None, tokenizer=None, q_idx=None, query_vec=None):
+    # Load dataset and encode queries
+    qids, questions, answers, _ = load_qa_pairs(args.test_path, args, q_idx)
+
+    if query_vec is None:
+        raise NotImplementedError
+
+    # Load MIPS
+    if mips is None:
+        mips = load_phrase_index(args)
+
+    # Search
+    step = args.eval_batch_size
+    logger.info(f'Aggergation strategy used: {args.agg_strat}')
+    predictions = []
+    evidences = []
+    titles = []
+    scores = []
+    se_poss = []
+    for q_idx in tqdm(range(0, len(questions), step)):
+        result = mips.search(
+            query_vec[q_idx:q_idx+step],
+            q_texts=questions[q_idx:q_idx+step], nprobe=args.nprobe,
+            top_k=args.top_k, max_answer_length=args.max_answer_length,
+            aggregate=args.aggregate, agg_strat=args.agg_strat, return_sent=args.return_sent
+        )
+        prediction = [[ret['answer'] for ret in out][:args.top_k] if len(out) > 0 else [''] for out in result]
+        evidence = [[ret['context'] for ret in out][:args.top_k] if len(out) > 0 else [''] for out in result]
+        title = [[ret['title'] for ret in out][:args.top_k] if len(out) > 0 else [['']] for out in result]
+        score = [[ret['score'] for ret in out][:args.top_k] if len(out) > 0 else [-1e10] for out in result]
+        se_pos = [[(ret['start_pos'], ret['end_pos']) for ret in out][:args.top_k] if len(out) > 0 else [(0,0)] for out in result]
+        predictions += prediction
+        evidences += evidence
+        titles += title
+        scores += score
+        se_poss += se_pos
+
+    eval_fn = evaluate_results
+    return eval_fn(predictions, qids, questions, answers, args, evidences, scores, titles, se_positions=se_poss)
+
 if __name__ == '__main__':
     # See options in densephrases.options
     options = Options()
@@ -428,38 +446,17 @@ if __name__ == '__main__':
     options.add_data_options()
     options.add_qsft_options()
     
-    options.parser.add_argument("--label_strategy", default="gold")
     options.parser.add_argument("--pseudo_labeler_name_or_path")
     options.parser.add_argument("--pseudo_labeler_type", default='top_p_hard', choices=['top_p_hard','soft'])
     options.parser.add_argument("--pseudo_labeler_p", type=float, default=0.5)
     options.parser.add_argument("--pseudo_labeler_temp", type=float, default=1.0)
-    options.parser.add_argument("--student_temp", type=float, default=1.0)
-    options.parser.add_argument("--pred_top_k", type=int, default=10)
-    options.parser.add_argument("--multivec_len", type=int, default=1)
     options.parser.add_argument("--top1_earlystop", action='store_true')
-    options.parser.add_argument("--is_entity_question", action='store_true')
+    options.parser.add_argument("--pred_top_k", type=int, default=10)
     options.parser.add_argument("--no_eval_before_tqr", action='store_true')
-    options.parser.add_argument("--no_title", action='store_true')
-    options.parser.add_argument("--save_psg_pred", action='store_true')
-    options.parser.add_argument("--optimizer", default='adam', choices=['adam','sgd', 'sgdm0.9', 'sgdm0.99','rmsprop'])
-    options.parser.add_argument("--input_type", default='3sent', choices=['3sent', '1sent', '5sent', 'whole'])
-    options.parser.add_argument("--title_delimiter", default='sep', choices=['sep','space'])
-    options.parser.add_argument("--no_lr_schedule", default=0, type=int)
-    options.parser.add_argument("--grid_option", default=1, type=int)
-    options.parser.add_argument("--ce_cache_path", default=None)
-    options.parser.add_argument("--overwrite_cache", action='store_true')
-    options.parser.add_argument("--online_learning", action='store_true')
-    options.parser.add_argument("--keep_prev_topk", action='store_true')
-    options.parser.add_argument("--keep_cur_topk", action='store_true')
-    options.parser.add_argument("--keep_prev_topk_tgts", type=str, default='top_p')
-    options.parser.add_argument("--noise_type", type=str, default='none')
-    options.parser.add_argument("--noise_norm", type=float, default=0.0)
-    options.parser.add_argument("--update_mode", default='gradient', choices=['gradient', 'interpolation_pos'])
-    options.parser.add_argument("--interpolation_beta", type=float, default=1.0)
-    options.parser.add_argument("--interpolation_k", type=int, default=10)
     args = options.parse()
 
     assert args.pseudo_labeler_temp > 0
+
     # Seed for reproducibility
     random.seed(args.seed)
     np.random.seed(args.seed)
@@ -467,7 +464,7 @@ if __name__ == '__main__':
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(args.seed)
 
-    elif args.run_mode == 'test_query_vec':
+    if args.run_mode == 'test_query_vec':
         logging.getLogger("eval_phrase_retrieval").setLevel(logging.DEBUG)
         logging.getLogger("densephrases.utils.open_utils").setLevel(logging.DEBUG)
 
@@ -484,8 +481,7 @@ if __name__ == '__main__':
         q_ids, questions, answers, titles = load_qa_pairs(
             args.test_path, 
             args, 
-            shuffle=False,
-            draft_num_examples=args.draft_num_examples
+            shuffle=False
         )
 
         if len(q_ids) == 2:
@@ -494,3 +490,5 @@ if __name__ == '__main__':
         query_vecs = embed_all_query(questions, args, query_encoder, tokenizer)
         
         do_test_query(args, mips, query_encoder, tokenizer, q_ids, questions, answers, titles, query_vecs)
+    else:
+        raise NotImplementedError
