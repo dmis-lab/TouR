@@ -4,6 +4,8 @@ import random
 import numpy as np
 import logging
 import copy
+import os
+import json
 
 from tqdm import tqdm
 from DensePhrases.densephrases.utils.single_utils import load_encoder
@@ -74,7 +76,6 @@ def annotate_phrase_vecs(mips, q_ids, questions, answers, titles, phrase_groups,
                          pseudo_label_fct=None, is_skips=[]):
     if len(is_skips) == 0:
         is_skips = [False] * len(questions)
-    is_psg = args.eval_psg
         
     assert mips is not None
     batch_size = len(q_ids)
@@ -132,7 +133,7 @@ def annotate_phrase_vecs(mips, q_ids, questions, answers, titles, phrase_groups,
         ]
 
         # phrase.keys(): dict_keys(['context', 'title', 'doc_idx', 'start_pos', 'end_pos', 'start_idx', 'end_idx', 'score', 'start_vec', 'end_vec', 'answer'])
-        targets = [pseudo_label_fct(phrase_group, question, is_skip, is_psg=is_psg) for phrase_group, question, is_skip in
+        targets = [pseudo_label_fct(phrase_group, question, is_skip) for phrase_group, question, is_skip in
                     zip(phrase_groups, questions, is_skips)]
         
         targets = [target[0] for target in targets]
@@ -356,14 +357,15 @@ def do_tour(args, mips, q_ids=None, questions=None, answers=None, titles=None, q
     
     # evaluate query vectors after TouR
     new_args = copy.deepcopy(args)
-    new_args.save_pred = False
+    new_args.save_pred = True
     new_args.aggregate = True
     em_top1, _, em_topk, _ = evaluate(new_args, mips, query_vec=query_vecs)
 
     # aggregate scores from dual-encoder and cross-encoder
     if args.do_score_aggregation:
-        # load dual-encoder prediction
+        # load predictions from dual-encoder
         total = len(questions)
+        pred_dir = os.path.join(args.load_dir, 'pred')
         pred_path = os.path.join(
             pred_dir, os.path.splitext(os.path.basename(args.test_path))[0] + f'_{total}_top{args.top_k}.pred'
         )
@@ -372,15 +374,14 @@ def do_tour(args, mips, q_ids=None, questions=None, answers=None, titles=None, q
         # aggregate cross-encoder scores
         predictions = ce_model.do_rerank(
             qas_to_rerank,
-            bsz=args.bsz,
-            fp16=True,
             rerank_k=args.top_k,
-            rerank_l=args.rerank_l,
+            rerank_lambda=args.rerank_lambda,
         )
             
         with open(args.test_path) as f:
             answers = {d['id']:d['answers'] for d in json.load(f)['data']}
 
+        # evaluate predictions after aggregation
         em_top1 = evaluate_prediction_rerank(predictions, answers, args)
 
     logger.info(f"Acc={em_top1:.2f} | Acc@{new_args.top_k}={em_topk:.2f}")
@@ -396,7 +397,7 @@ def evaluate_prediction_rerank(predictions, answers, args):
         top1_pred = prediction['prediction'][0]
         match_fn = drqa_regex_match_score if args.regex else drqa_exact_match_score
         ems.append(max([match_fn(top1_pred, gt) for gt in groundtruth]))
-    final_em = np.mean(ems)
+    final_em = np.mean(ems) * 100
     return final_em
 
 def load_json(fi):
@@ -460,11 +461,12 @@ if __name__ == '__main__':
     options.add_qsft_options()
     
     options.parser.add_argument("--pseudo_labeler_name_or_path")
-    options.parser.add_argument("--pseudo_labeler_type", default='top_p_hard', choices=['top_p_hard','soft'])
+    options.parser.add_argument("--pseudo_labeler_type", default='hard', choices=['hard','soft'])
     options.parser.add_argument("--pseudo_labeler_p", type=float, default=0.5)
     options.parser.add_argument("--pseudo_labeler_temp", type=float, default=1.0)
     options.parser.add_argument("--top1_earlystop", action='store_true')
     options.parser.add_argument("--do_score_aggregation", action='store_true')
+    options.parser.add_argument("--rerank_lambda", type=float, default=0.1)
     args = options.parse()
 
     assert args.pseudo_labeler_temp > 0
@@ -499,4 +501,4 @@ if __name__ == '__main__':
     query_vecs = embed_all_query(questions, args, query_encoder, tokenizer)
     
     # do TouR
-    do_tour(args, mips, query_encoder, tokenizer, q_ids, questions, answers, titles, query_vecs)
+    do_tour(args, mips, q_ids, questions, answers, titles, query_vecs)

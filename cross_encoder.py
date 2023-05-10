@@ -144,7 +144,6 @@ def load_json(fi):
             item.update(value)
             results.append(item)
             logging.info(f'Loaded {i + 1} Items from {fi}') if i % 1000 == 0 else None
-    # logging.info(f'Loaded {i + 1} Items from {fi}')
     return results
 
 def dump_json(items, fi):
@@ -405,13 +404,13 @@ class CrossEncoder(object):
         output = {k: v.cuda() for k, v in inputs.items()} if cuda else inputs
         return output
 
-    def hard_label(self, outputs, top_p_or_top_k):
+    def hard_label(self, outputs, top_p):
         pos_logits = outputs[:,1]/self.pseudo_labeler_temp
         sorted_idx = torch.argsort(pos_logits, descending=True)
         pos_probs = torch.softmax(pos_logits, dim=-1)
         pos_cumsum_probs = torch.cumsum(pos_probs[sorted_idx],dim=-1)
         all_predictions = torch.zeros_like(pos_logits).long()
-        bools = torch.where(pos_cumsum_probs >= top_p_or_top_k)[0]
+        bools = torch.where(pos_cumsum_probs >= top_p)[0]
         if len(bools) > 0:
             idx = bools[0]
             true_idx = sorted_idx[:idx+1]
@@ -496,9 +495,7 @@ class CrossEncoder(object):
         
         return all_predictions, scores
     
-    def do_rerank(self, qas, use_cuda=True, bsz=1, fp16=False, rerank_l=1.0, rerank_k=10):
-        t = time.time()
-
+    def do_rerank(self, qas, use_cuda=True, bsz=1, rerank_lambda=1.0, rerank_k=10):
         def forward(inputs):
             batch_size, top_k, seq_length = inputs['input_ids'].shape
             inputs['input_ids'] = inputs['input_ids'].reshape(-1, seq_length).to(self.device)
@@ -530,7 +527,7 @@ class CrossEncoder(object):
                     for evidence, se_pos, prediction, score, title in zip(b['evidence'], b['se_pos'], b['prediction'], b['score'], b['title']):
                         has_cache = self.ce_cache.is_cached(question, evidence, se_pos[0], se_pos[1])
                         
-                        if self.no_caching or not has_cache:
+                        if not has_cache:
                             new_evidence.append(evidence)
                             new_se_pos.append(se_pos)
                             new_prediction.append(prediction)
@@ -556,6 +553,7 @@ class CrossEncoder(object):
                     if padded_batch:
                         logits = logits[:-1]
                         new_batch = [new_batch[0]]
+                    
                     # save scores to cache
                     for b, logit in zip(new_batch, logits):
                         question = b['question']
@@ -576,18 +574,17 @@ class CrossEncoder(object):
                             
                 scores = torch.nn.Softmax(dim=-1)(scores)
                 
-                # interpolation dph score
-                if rerank_l < 1:
+                # aggregate densephrases score
+                if rerank_lambda < 1:
                     dph_scores = [b['score'][:rerank_k][:len(b['prediction'])] for b in batch]
                     dph_scores = [[0 if _ == '' else _ for _ in d] for d in dph_scores]
                     dph_scores = [[_/100 for _ in d] for d in dph_scores] # for smoothing softmax 
                     dph_scores = torch.nn.Softmax(dim=-1)(torch.tensor(dph_scores))
-                    scores = rerank_l * scores + (1 - rerank_l) * dph_scores
+                    scores = rerank_lambda * scores + (1 - rerank_lambda) * dph_scores
                 
                 inds = torch.argsort(scores, descending=True)
                 
                 outputs.extend(inds.tolist())
                 output_scores.extend(scores.tolist())
 
-        self.ce_cache.save_cache()
         return get_output_format(qas, outputs, output_scores)
