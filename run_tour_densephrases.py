@@ -322,12 +322,14 @@ def test_query_vec(args, mips, query_vecs, data, pseudo_label_fct=None):
             
     return query_vecs
 
-def do_test_query(args, mips, query_encoder=None, tokenizer=None, q_ids=None, questions=None, answers=None, titles=None, query_vecs=None):
+def do_tour(args, mips, q_ids=None, questions=None, answers=None, titles=None, query_vecs=None):
     if args.eval_psg:
         raise NotImplementedError
-    else:
-        task = 'odqa'
-        
+
+    task = 'odqa'
+    batch_size = args.per_device_train_batch_size
+
+    # load a cross-encoder    
     ce_model = CrossEncoder(
         model_name_or_path=args.pseudo_labeler_name_or_path,
         pseudo_labeler_type=args.pseudo_labeler_type,
@@ -338,23 +340,8 @@ def do_test_query(args, mips, query_encoder=None, tokenizer=None, q_ids=None, qu
     )
     pseudo_label_fct = ce_model.do_labeling
 
-    batch_size = args.per_device_train_batch_size
-
-    logger.info(f"Before applying TouR on {len(questions)} questions")
-    if args.no_eval_before_tqr:
-        pass
-    elif args.eval_psg:
-        raise NotImplementedError
-    elif not args.is_kilt:
-        new_args = copy.deepcopy(args)
-        new_args.save_pred = False
-        new_args.aggregate = True
-        em_top1, _, em_topk, _ = evaluate(new_args, mips, query_encoder=query_encoder,
-                                                            tokenizer=tokenizer, query_vec=query_vecs)
-    else:
-        raise NotImplementedError
-    
     # update query vector
+    logger.info(f"Start TouR on {len(questions)} questions")
     updated_query_vecs = np.copy(query_vecs)
     for i in tqdm(range(0, len(q_ids), batch_size)):
         updated_query_vecs_batch = test_query_vec(
@@ -365,34 +352,75 @@ def do_test_query(args, mips, query_encoder=None, tokenizer=None, q_ids=None, qu
         update_batch_size = len(updated_query_vecs_batch)
         updated_query_vecs[i:i+update_batch_size] = updated_query_vecs_batch
     query_vecs = updated_query_vecs
+    logger.info(f"Finish TouR")
+    
+    # evaluate query vectors after TouR
+    new_args = copy.deepcopy(args)
+    new_args.save_pred = False
+    new_args.aggregate = True
+    em_top1, _, em_topk, _ = evaluate(new_args, mips, query_vec=query_vecs)
+    logger.info(f"Acc={em_top1:.2f} | Acc@{new_args.top_k}={em_topk:.2f}")
 
-    logger.info(f"After apply TouR on {len(questions)} questions")
-    if args.eval_psg:
-        raise NotImplementedError
-    elif not args.is_kilt:
-        new_args = copy.deepcopy(args)
-        new_args.save_pred = False
-        new_args.aggregate = True
-        em_top1, f1_top1, em_topk, f1_topk = evaluate(new_args, mips, query_encoder=query_encoder,
-                                                      tokenizer=tokenizer, query_vec=query_vecs)
+    # aggregate scores from dual-encoder and cross-encoder
+    total = len(questions)
+    pred_path = os.path.join(
+        pred_dir, os.path.splitext(os.path.basename(args.test_path))[0] + f'_{total}_top{args.top_k}.pred'
+    )
+    qas_to_rerank = load_json(pred_path)
 
-        logger.info(f"Acc={em_top1:.2f} | F1={f1_top1:.2f}")
-        logger.info(f"Acc@{new_args.top_k}={em_topk:.2f} | F1@{new_args.top_k}={f1_topk:.2f}")
-    else:
-        raise NotImplementedError
+    predictions = ce_model.do_rerank(
+        qas_to_rerank,
+        bsz=args.bsz,
+        fp16=True,
+        rerank_k=args.top_k
+        rerank_l=args.rerank_l,
+    )
+    
+    # Dump predictions
+    pred_dir = os.path.join(args.output_dir, 'pred')
+    if not os.path.exists(pred_dir):
+        os.makedirs(pred_dir)
+    total = len(predictions)
+    pred_path = os.path.join(
+        pred_dir, os.path.splitext(os.path.basename(args.pred_path))[0] + f'_rerank_k{args.rerank_k}_l{args.rerank_l}.pred'
+    )
+    logger.info(f'Saving custom prediction file to {pred_path}')
+    with open(pred_path, 'w') as f:
+        json.dump(predictions, f)
+        
+    try:
+        with open(args.test_path) as f:
+            answers = {d['id']:d['answers'] for d in json.load(f)['data']}
+    except Exception:
+        with open(args.test_path) as f:
+            data = json.load(f)
+            answers = {d['id']:d['answers'] for d in json.load(f)['data']}
 
-def evaluate(args, mips=None, query_encoder=None, tokenizer=None, q_idx=None, query_vec=None):
-    # Load dataset and encode queries
-    qids, questions, answers, _ = load_qa_pairs(args.test_path, args, q_idx)
+    evaluate_prediction_rerank(predictions, answers, args)
 
-    if query_vec is None:
-        raise NotImplementedError
+def load_json(fi):
+    logging.info(f'Loading {fi}')
 
-    # Load MIPS
-    if mips is None:
-        mips = load_phrase_index(args)
+    results = []
+    with open(fi) as f:
+        data = json.load(f)
+        for i, (q_id, value) in enumerate(data.items()):
+            if 'after_prf' in value:
+                value = value['after_prf']
+            item = {
+                'q_id': q_id
+            }
+            item.update(value)
+            results.append(item)
+            logging.info(f'Loaded {i + 1} Items from {fi}') if i % 1000 == 0 else None
+    # logging.info(f'Loaded {i + 1} Items from {fi}')
+    return results
 
-    # Search
+def evaluate(args, mips, query_vec):
+    # load dataset and encode queries
+    qids, questions, answers, _ = load_qa_pairs(args.test_path, args)
+
+    # search
     step = args.eval_batch_size
     logger.info(f'Aggergation strategy used: {args.agg_strat}')
     predictions = []
@@ -435,7 +463,6 @@ if __name__ == '__main__':
     options.parser.add_argument("--pseudo_labeler_p", type=float, default=0.5)
     options.parser.add_argument("--pseudo_labeler_temp", type=float, default=1.0)
     options.parser.add_argument("--top1_earlystop", action='store_true')
-    options.parser.add_argument("--no_eval_before_tqr", action='store_true')
     args = options.parse()
 
     assert args.pseudo_labeler_temp > 0
@@ -447,31 +474,27 @@ if __name__ == '__main__':
     if torch.cuda.is_available():
         torch.cuda.manual_seed_all(args.seed)
 
-    if args.run_mode == 'test_query_vec':
-        logging.getLogger("eval_phrase_retrieval").setLevel(logging.DEBUG)
-        logging.getLogger("densephrases.utils.open_utils").setLevel(logging.DEBUG)
+    logging.getLogger("eval_phrase_retrieval").setLevel(logging.DEBUG)
+    logging.getLogger("densephrases.utils.open_utils").setLevel(logging.DEBUG)
 
-        # Train
-        mips = load_phrase_index(args)
+    # load the phrase index
+    mips = load_phrase_index(args)
 
-        # Query encoder
-        device = 'cuda' if args.cuda else 'cpu'
-        logger.info("Loading pretrained encoder: this one is for MIPS (fixed)")
-        logger.info("Args: {}".format(args))
-        query_encoder, tokenizer, _ = load_encoder(device, args, query_only=True)
+    # load the query encoder
+    device = 'cuda' if args.cuda else 'cpu'
+    logger.info("Loading pretrained encoder: this one is for MIPS (fixed)")
+    logger.info("Args: {}".format(args))
+    query_encoder, tokenizer, _ = load_encoder(device, args, query_only=True)
 
-        # Load test questions
-        q_ids, questions, answers, titles = load_qa_pairs(
-            args.test_path, 
-            args, 
-            shuffle=False
-        )
+    # load test questions
+    q_ids, questions, answers, titles = load_qa_pairs(
+        args.test_path, 
+        args, 
+        shuffle=False
+    )
 
-        if len(q_ids) == 2:
-            q_ids = q_ids[0]
-
-        query_vecs = embed_all_query(questions, args, query_encoder, tokenizer)
-        
-        do_test_query(args, mips, query_encoder, tokenizer, q_ids, questions, answers, titles, query_vecs)
-    else:
-        raise NotImplementedError
+    # embed queries
+    query_vecs = embed_all_query(questions, args, query_encoder, tokenizer)
+    
+    # do TouR
+    do_tour(args, mips, query_encoder, tokenizer, q_ids, questions, answers, titles, query_vecs)

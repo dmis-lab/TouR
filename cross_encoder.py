@@ -187,32 +187,6 @@ def get_output_format(qas, prediction_indices, output_scores):
     
     return output
 
-def get_output_format_psg(qas, prediction_indices):
-    assert len(qas) == len(prediction_indices)
-    output = []
-    for sample, prediction_index in zip(qas, prediction_indices):
-        top_k = len(prediction_index)
-        
-        texts = [k['text'] for k in sample['ctxs']]
-        titles = [k['title'] for k in sample['ctxs']]
-        se_poses = [k['se_pos'] for k in sample['ctxs']]
-        predictions = [k['prediction'] for k in sample['ctxs']]
-        
-        texts = sort_based_on_index(texts[:top_k], prediction_index) + texts[top_k:]
-        titles = sort_based_on_index(titles[:top_k], prediction_index) + titles[top_k:]
-        se_poses = sort_based_on_index(se_poses[:top_k], prediction_index) + se_poses[top_k:]
-        predictions = sort_based_on_index(predictions[:top_k], prediction_index) + predictions[top_k:]
-        
-        sample['ctxs'] = [{
-            'text':text,
-            'title':title,
-            'se_pos':se_pos,
-            'prediction':prediction
-        } for text, title, se_pos, prediction in zip(texts,titles,se_poses,predictions)]
-        output.append(sample)
-        
-    return output
-
 def tag_phrase_in_passage(se_pos, phrase, passage):
     s_pos, e_pos = se_pos
     passage = passage[:s_pos] + ' [S] ' + phrase + ' [E] ' + passage[e_pos:]
@@ -288,47 +262,23 @@ def tag_phrase_in_sentence(se_pos, phrase, doc, num_sent=3):
         return "", is_valid
 
 class CE_Cache(object):
-    def __init__(self, cache_path, overwrite_cache):
-        self.cache_path = cache_path
-        print(f"cache_path {cache_path}, overwrite_cache={overwrite_cache}")
-        if overwrite_cache:
-            self.cache = {} # global cache for saving pseudo label
-        elif self.cache_path and os.path.exists(self.cache_path):
-            self.load_cache()
-        else:
-            self.cache = {}
-    
-    def load_cache(self):
-        try:
-            with open(self.cache_path) as f:
-                self.cache = json.load(f)
-        except:
-            self.cache = {}
-        logging.info(f"{self.cache_path} ({len(self.cache)}) is loaded")
+    def __init__(self):
+        self.cache = {}
         
-    def save_cache(self):
-        # save cache when reranking is done
-        if self.cache_path:
-            with open(self.cache_path, 'w') as f:
-                json.dump(self.cache, f, indent=2)
-        
-    def get_cache_key(self, question, evidence, s_pos=None, e_pos=None, is_psg=False):
-        if is_psg:
-            cache_key = ';'.join([question, evidence])
-        else:
-            cache_key = ';'.join([question, evidence, str(s_pos), str(e_pos)])
+    def get_cache_key(self, question, evidence, s_pos=None, e_pos=None):
+        cache_key = ';'.join([question, evidence, str(s_pos), str(e_pos)])
         return cache_key
     
-    def is_cached(self, question, evidence, s_pos=None, e_pos=None, is_psg=False):
-        cache_key = self.get_cache_key(question, evidence, s_pos, e_pos, is_psg)
+    def is_cached(self, question, evidence, s_pos=None, e_pos=None):
+        cache_key = self.get_cache_key(question, evidence, s_pos, e_pos)
         return cache_key in self.cache
     
-    def set_cache(self, question, evidence, s_pos=None, e_pos=None, logit=None, is_psg=False):
-        cache_key = self.get_cache_key(question, evidence, s_pos, e_pos, is_psg)
+    def set_cache(self, question, evidence, s_pos=None, e_pos=None, logit=None):
+        cache_key = self.get_cache_key(question, evidence, s_pos, e_pos)
         self.cache[cache_key] = logit
         
-    def get_cache(self, question, evidence, s_pos=None, e_pos=None, is_psg=False):
-        cache_key = self.get_cache_key(question, evidence, s_pos, e_pos, is_psg)
+    def get_cache(self, question, evidence, s_pos=None, e_pos=None):
+        cache_key = self.get_cache_key(question, evidence, s_pos, e_pos)
         return self.cache[cache_key]
     
 class CrossEncoder(object):
@@ -345,16 +295,13 @@ class CrossEncoder(object):
                  pseudo_labeler_p='',
                  pseudo_labeler_temp='',
                  minimum_pos=0,
-                 cache_path='',
-                 overwrite_cache=False
                  ):
         self.no_title = no_title
         self.title_delimiter = title_delimiter
         self.task = task
         self.been = 0 # for logging
         self.verbose = verbose
-        self.input_type = 'whole' if task == 'psg' else input_type
-        self.no_caching = cache_path == ''
+        self.input_type = input_type
         
         if input_type == '1sent':
             self.num_sent = 1
@@ -377,7 +324,7 @@ class CrossEncoder(object):
         self.max_seq_length = 512
         self.no_title = no_title
         self.been = 0
-        self.ce_cache = CE_Cache(cache_path, overwrite_cache)
+        self.ce_cache = CE_Cache()
             
         self.pseudo_labeler_type = pseudo_labeler_type
         self.pseudo_labeler_k = pseudo_labeler_k
@@ -388,37 +335,14 @@ class CrossEncoder(object):
     def load_model(self, model_name_or_path):
         logger.info(f'[{self.task}] Loading model from: {model_name_or_path}')
         
-        if self.task == 'odqa':
-            config = AutoConfig.from_pretrained(model_name_or_path)
-            tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, do_lower_case=False)
-            model = AutoModelForSequenceClassification.from_pretrained(
-                model_name_or_path,
-                from_tf=bool(".ckpt" in model_name_or_path),
-                config=config,
-            ).to(self.device)
-            model = model.eval()
-        elif self.task == 'psg':
-            model = torch.load(model_name_or_path)
-            logging.info(f"Successfully loaded checkpoint '{model_name_or_path}'")
-            model_state_dict, model_config = model["model"], model["config"]
-            reranker_type = model_config["reranker_model_type"]
-            config = model_config["encoder_config"]
-            encoder = model_config["encoder"]
-            # Conversion from the older transformers checkpoint
-            if not hasattr(config, "use_cache"):
-                config.use_cache = True
-            tokenizer = AutoTokenizer.from_pretrained(encoder)
-            encoder = AutoModel.from_config(config)
-            assert reranker_type == 'baseline'
-            # TODO! refactoring
-            self.query_builder = BaselineRerankerQueryBuilder(tokenizer, model_config["max_length"])
-            model = BaselineReranker(
-                    config,
-                    encoder).to(self.device)
-            model.load_state_dict(model_state_dict, strict=False)
-            model.eval()
-        else:
-            raise NotImplementedError
+        config = AutoConfig.from_pretrained(model_name_or_path)
+        tokenizer = AutoTokenizer.from_pretrained(model_name_or_path, do_lower_case=False)
+        model = AutoModelForSequenceClassification.from_pretrained(
+            model_name_or_path,
+            from_tf=bool(".ckpt" in model_name_or_path),
+            config=config,
+        ).to(self.device)
+        model = model.eval()
         
         return model, tokenizer
 
@@ -482,57 +406,16 @@ class CrossEncoder(object):
         return output
 
     def hard_label(self, outputs, top_p_or_top_k):
-        if self.pseudo_labeler_type == 'top_k_hard':
-            all_predictions = torch.zeros_like(outputs[:,1]).long()
-            top_k_idx = torch.argsort(outputs[:, 1], descending=True)[:top_p_or_top_k]
-            all_predictions[top_k_idx] = 1
-        elif self.pseudo_labeler_type == 'p_hard':
-            pos_probs = torch.softmax(outputs, dim=-1)[:,1]
-            all_predictions =  pos_probs > top_p_or_top_k
-            if self.minimum_pos >0:
-                all_predictions = torch.logical_or(all_predictions, pos_probs == pos_probs.max())
-        elif self.pseudo_labeler_type == 'top_p_hard':
-            pos_logits = outputs[:,1]/self.pseudo_labeler_temp
-            sorted_idx = torch.argsort(pos_logits, descending=True)
-            pos_probs = torch.softmax(pos_logits, dim=-1)
-            pos_cumsum_probs = torch.cumsum(pos_probs[sorted_idx],dim=-1)
-            all_predictions = torch.zeros_like(pos_logits).long()
-            bools = torch.where(pos_cumsum_probs >= top_p_or_top_k)[0]
-            if len(bools) > 0:
-                idx = bools[0]
-                true_idx = sorted_idx[:idx+1]
-                all_predictions[true_idx] = 1    
-        else:
-            raise NotImplementedError
-        
-        all_predictions = all_predictions.cpu().detach().numpy()
-        return all_predictions
-    
-    # TODO! need to merget this to hard_label()
-    def hard_label_psg(self, outputs, top_p_or_top_k):
-        if self.pseudo_labeler_type == 'top_k_hard':
-            all_predictions = torch.zeros_like(outputs).long()
-            top_k_idx = torch.argsort(outputs, descending=True)[:int(top_p_or_top_k)]
-            all_predictions[top_k_idx] = 1
-        elif self.pseudo_labeler_type == 'p_hard':
-            pos_probs = torch.sigmoid(outputs/self.pseudo_labeler_temp) # Note! this is sigmoid
-            all_predictions =  pos_probs > top_p_or_top_k
-            if self.minimum_pos >0:
-                all_predictions = torch.logical_or(all_predictions, pos_probs == pos_probs.max())
-        elif self.pseudo_labeler_type == 'top_p_hard':
-            pos_logits = outputs/self.pseudo_labeler_temp
-            sorted_idx = torch.argsort(pos_logits, descending=True)
-            pos_probs = torch.softmax(pos_logits, dim=-1)
-            pos_cumsum_probs = torch.cumsum(pos_probs[sorted_idx],dim=-1)
-            all_predictions = torch.zeros_like(pos_logits).long()
-            bools = torch.where(pos_cumsum_probs >= top_p_or_top_k)[0]
-            if len(bools) > 0:
-                idx = bools[0]
-                true_idx = sorted_idx[:idx+1]
-                all_predictions[true_idx] = 1    
-        else:
-            import pdb; pdb.set_trace()
-            raise NotImplementedError
+        pos_logits = outputs[:,1]/self.pseudo_labeler_temp
+        sorted_idx = torch.argsort(pos_logits, descending=True)
+        pos_probs = torch.softmax(pos_logits, dim=-1)
+        pos_cumsum_probs = torch.cumsum(pos_probs[sorted_idx],dim=-1)
+        all_predictions = torch.zeros_like(pos_logits).long()
+        bools = torch.where(pos_cumsum_probs >= top_p_or_top_k)[0]
+        if len(bools) > 0:
+            idx = bools[0]
+            true_idx = sorted_idx[:idx+1]
+            all_predictions[true_idx] = 1
         
         all_predictions = all_predictions.cpu().detach().numpy()
         return all_predictions
@@ -543,20 +426,9 @@ class CrossEncoder(object):
         pos_probs = pos_probs.cpu().detach().numpy()
         return pos_probs
     
-    def soft_label_psg(self, outputs):
-        # pos_probs = torch.sigmoid(outputs/self.pseudo_labeler_temp) # Note! this is sigmoid
-        pos_probs = outputs/self.pseudo_labeler_temp # Note! this is sigmoid
-        pos_probs = pos_probs.cpu().detach().numpy()
-        return pos_probs
-
-    def do_labeling(self, phrase_group, question, is_skip, is_psg=False):
+    def do_labeling(self, phrase_group, question, is_skip):
         if is_skip:
             labels = np.array([0] * len(phrase_group))
-            return -1, labels
-        
-        if self.pseudo_labeler_type == 'top_k':
-            labels = np.array([0] * len(phrase_group))
-            labels[:self.pseudo_labeler_k] = 1
             return -1, labels
         
         # phrase_group: a list of "phrase"s.
@@ -565,113 +437,67 @@ class CrossEncoder(object):
         # filter new_phrase_groups
         new_phrase_group = []
         for _, phrase in enumerate(phrase_group):
-            if is_psg:
-                has_cache = self.ce_cache.is_cached(question, phrase['context'], is_psg=True)
-            else:
-                has_cache = self.ce_cache.is_cached(question, phrase['context'], phrase['start_pos'], phrase['end_pos'])
+            has_cache = self.ce_cache.is_cached(question, phrase['context'], phrase['start_pos'], phrase['end_pos'])
             
-            if self.no_caching or not has_cache:
+            if not has_cache:
                 new_phrase_group.append(phrase)
         
         # inference using new_phrase_groups
         if len(new_phrase_group) > 0:
             with torch.inference_mode():
                 n_phrases = len(new_phrase_group)
-                if self.task == 'odqa':
-                    docs = list(sentencizer.pipe([phrase['context'] for phrase in new_phrase_group]))
-                    evidences_and_is_valids = [tag_phrase_in_sentence([phrase['start_pos'],phrase['end_pos']], phrase['answer'], doc, num_sent=self.num_sent) for (phrase, doc) in zip(new_phrase_group, docs)]
-                    evidences = [s[0] for s in evidences_and_is_valids]
-                    if not self.no_title:
-                        assert len(new_phrase_group[0]['title']) == 1
-                        evidences = [f'{phrase["title"][0]} {self.tokenizer.sep_token} {ev}' for ev, phrase in zip(evidences, new_phrase_group)]
+                docs = list(sentencizer.pipe([phrase['context'] for phrase in new_phrase_group]))
+                evidences_and_is_valids = [tag_phrase_in_sentence([phrase['start_pos'],phrase['end_pos']], phrase['answer'], doc, num_sent=self.num_sent) for (phrase, doc) in zip(new_phrase_group, docs)]
+                evidences = [s[0] for s in evidences_and_is_valids]
+                if not self.no_title:
+                    assert len(new_phrase_group[0]['title']) == 1
+                    evidences = [f'{phrase["title"][0]} {self.tokenizer.sep_token} {ev}' for ev, phrase in zip(evidences, new_phrase_group)]
 
-                    # logging
-                    if self.been < 3:
-                        print(question)
-                        print(evidences[0])
-                        self.been += 1
-                    
-                    sentence_pairs =(
-                        ([question]*n_phrases, evidences)
-                    )
-                    encodings = self.tokenizer(
-                        *sentence_pairs, 
-                        padding='longest', 
-                        max_length=self.max_seq_length, 
-                        truncation=True, 
-                        return_tensors="pt"
-                    )
-                    encodings = encodings.to(self.device)
-                    logits = self.model(**encodings)[0]
-                elif self.task == 'psg':
-                    evidences = [phrase['context'] for phrase in new_phrase_group]
-                    
-                    # logging
-                    if self.been < 3:
-                        print(question)
-                        print(evidences[0])
-                        self.been += 1
-                        
-                    passages = [(phrase["title"][0],ev) for ev, phrase in zip(evidences, new_phrase_group)]
-                    inputs = self.query_builder(question, passages, False)
-                    inputs = {key: inputs[key].cuda() for key in ["input_ids", "attention_mask"]}
-                    logits = self.model(inputs)[0]
-                else:
-                    raise NotImplementedError
+                # logging
+                if self.been < 2:
+                    print(question)
+                    print(evidences[0])
+                    self.been += 1
+                
+                sentence_pairs =(
+                    ([question]*n_phrases, evidences)
+                )
+                encodings = self.tokenizer(
+                    *sentence_pairs, 
+                    padding='longest', 
+                    max_length=self.max_seq_length, 
+                    truncation=True, 
+                    return_tensors="pt"
+                )
+                encodings = encodings.to(self.device)
+                logits = self.model(**encodings)[0]
                 
                 # caching
                 for phrase, logit in zip(new_phrase_group, logits):
                     logit = logit.detach().cpu().tolist()
-                    if is_psg:
-                        self.ce_cache.set_cache(question, phrase['context'], logit=logit, is_psg=True)
-                    else:
-                        self.ce_cache.set_cache(question, phrase['context'], phrase['start_pos'], phrase['end_pos'], logit)
+                    self.ce_cache.set_cache(question, phrase['context'], phrase['start_pos'], phrase['end_pos'], logit)
         
         # load probs from cache
         logits = []
         for _, phrase in enumerate(phrase_group):
-            if is_psg:
-                logit = self.ce_cache.get_cache(question, phrase['context'], is_psg=True)
-            else:
-                logit = self.ce_cache.get_cache(question, phrase['context'], phrase['start_pos'], phrase['end_pos'])
+            logit = self.ce_cache.get_cache(question, phrase['context'], phrase['start_pos'], phrase['end_pos'])
             logits.append(logit)
+        
         logits = torch.Tensor(logits)
         scores = None
-        if self.task == 'odqa':
-            if self.pseudo_labeler_type == 'top_k_hard':
-                all_predictions = self.hard_label(logits, self.pseudo_labeler_k)
-            elif self.pseudo_labeler_type == 'p_hard':
-                all_predictions = self.hard_label(logits, self.pseudo_labeler_p)
-            elif self.pseudo_labeler_type == 'top_p_hard':
-                all_predictions = self.hard_label(logits, self.pseudo_labeler_p)
-            elif self.pseudo_labeler_type == 'soft':
-                all_predictions = self.soft_label(logits)
-            
-            scores = logits[:,1]
-        elif self.task == 'psg':
-            if self.pseudo_labeler_type == 'top_k_hard':
-                all_predictions = self.hard_label_psg(logits, self.pseudo_labeler_k)
-            elif self.pseudo_labeler_type == 'p_hard':
-                all_predictions = self.hard_label_psg(logits, self.pseudo_labeler_p)
-            elif self.pseudo_labeler_type == 'top_p_hard':
-                all_predictions = self.hard_label_psg(logits, self.pseudo_labeler_p)
-            elif self.pseudo_labeler_type == 'soft':
-                all_predictions = self.soft_label_psg(logits)
-                
-            scores = logits
+        if self.pseudo_labeler_type == 'hard':
+            all_predictions = self.hard_label(logits, self.pseudo_labeler_p)
+        elif self.pseudo_labeler_type == 'soft':
+            all_predictions = self.soft_label(logits)
         else:
             raise NotImplementedError
+        
+        scores = logits[:,1]
         
         return all_predictions, scores
     
     def do_rerank(self, qas, use_cuda=True, bsz=1, fp16=False, rerank_l=1.0, rerank_k=10):
         t = time.time()
-
-        def log_progress(j, outputs):
-            t2 = time.time()
-            logger.info(
-                f'Reranked {j + 1} / {len(list(range(0, len(qas), bsz)))} batches in {t2 - t:0.2f} seconds '
-                f'({len(outputs) / (t2 - t): 0.4f} QAs per second)')
 
         def forward(inputs):
             batch_size, top_k, seq_length = inputs['input_ids'].shape
@@ -692,77 +518,62 @@ class CrossEncoder(object):
             for j, batch_start in tqdm(enumerate(range(0, len(qas), bsz)), total=int(len(qas)/bsz)):
                 batch = qas[batch_start: batch_start + bsz]
                 
-                #################
-                ### CACHING #####
-                #################
-                if self.task == 'odqa':
-                    # check cache and filter new inputs
-                    new_batch = []
-                    for b in batch:
-                        question = b['question']
-                        new_evidence = []
-                        new_se_pos = []
-                        new_prediction = []
-                        new_score = []
-                        new_title = []
-                        for evidence, se_pos, prediction, score, title in zip(b['evidence'], b['se_pos'], b['prediction'], b['score'], b['title']):
-                            has_cache = self.ce_cache.is_cached(question, evidence, se_pos[0], se_pos[1])
-                            
-                            if self.no_caching or not has_cache:
-                                new_evidence.append(evidence)
-                                new_se_pos.append(se_pos)
-                                new_prediction.append(prediction)
-                                new_score.append(score)
-                                new_title.append(title)
+                # check cache and filter new inputs
+                new_batch = []
+                for b in batch:
+                    question = b['question']
+                    new_evidence = []
+                    new_se_pos = []
+                    new_prediction = []
+                    new_score = []
+                    new_title = []
+                    for evidence, se_pos, prediction, score, title in zip(b['evidence'], b['se_pos'], b['prediction'], b['score'], b['title']):
+                        has_cache = self.ce_cache.is_cached(question, evidence, se_pos[0], se_pos[1])
                         
-                        new_b = copy.deepcopy(b)
-                        new_b['evidence'] = new_evidence
-                        new_b['se_pos'] = new_se_pos
-                        new_b['prediction'] = new_prediction
-                        new_b['score'] = new_score
-                        new_b['title'] = new_title
-                        if len(new_evidence)> 0:
-                            new_batch.append(new_b)
-                        
-                    if len(new_batch) != 0:
-                        padded_batch = len(new_batch) == 1
-                        if padded_batch: # hack for batch size 1 issues
-                            new_batch = [new_batch[0],new_batch[0]]
-                        
-                        inputs = self.tokenize_for_reranker(new_batch, use_cuda)
-                        logits = forward(inputs)
-                        if padded_batch:
-                            logits = logits[:-1]
-                            new_batch = [new_batch[0]]
-                        # save scores to cache
-                        for b, logit in zip(new_batch, logits):
-                            question = b['question']
-                            for evidence, se_pos, lg in zip(b['evidence'], b['se_pos'], logit):
-                                self.ce_cache.set_cache(question, evidence, se_pos[0], se_pos[1], lg)
-                            
-                    # restore stores
-                    scores = []
-                    for b in batch:
-                        score = []
-                        question = b['question']
-                        for evidence, se_pos in zip(b['evidence'], b['se_pos']):
-                            logit = self.ce_cache.get_cache(question, evidence, se_pos[0], se_pos[1])
-                            score.append(logit[1])
-                        score = score[:rerank_k]
-                        scores.append(score)
-                    scores = torch.Tensor(scores)
+                        if self.no_caching or not has_cache:
+                            new_evidence.append(evidence)
+                            new_se_pos.append(se_pos)
+                            new_prediction.append(prediction)
+                            new_score.append(score)
+                            new_title.append(title)
                     
-                elif self.task == 'psg':
-                    new_scores = []
-                    for b in batch:
+                    new_b = copy.deepcopy(b)
+                    new_b['evidence'] = new_evidence
+                    new_b['se_pos'] = new_se_pos
+                    new_b['prediction'] = new_prediction
+                    new_b['score'] = new_score
+                    new_b['title'] = new_title
+                    if len(new_evidence)> 0:
+                        new_batch.append(new_b)
+                    
+                if len(new_batch) != 0:
+                    padded_batch = len(new_batch) == 1
+                    if padded_batch: # hack for batch size 1 issues
+                        new_batch = [new_batch[0],new_batch[0]]
+                    
+                    inputs = self.tokenize_for_reranker(new_batch, use_cuda)
+                    logits = forward(inputs)
+                    if padded_batch:
+                        logits = logits[:-1]
+                        new_batch = [new_batch[0]]
+                    # save scores to cache
+                    for b, logit in zip(new_batch, logits):
                         question = b['question']
-                        passages = [(ctxs['title'], ctxs['text']) for ctxs in b['ctxs']]
-                        inputs = self.query_builder(question, passages, False)
-                        inputs = {key: inputs[key].cuda() for key in ["input_ids", "attention_mask"]}
-                        scores = self.model(inputs)
-                        new_scores.append(scores)
-                    new_scores = torch.vstack(new_scores)
+                        for evidence, se_pos, lg in zip(b['evidence'], b['se_pos'], logit):
+                            self.ce_cache.set_cache(question, evidence, se_pos[0], se_pos[1], lg)
                         
+                # restore stores
+                scores = []
+                for b in batch:
+                    score = []
+                    question = b['question']
+                    for evidence, se_pos in zip(b['evidence'], b['se_pos']):
+                        logit = self.ce_cache.get_cache(question, evidence, se_pos[0], se_pos[1])
+                        score.append(logit[1])
+                    score = score[:rerank_k]
+                    scores.append(score)
+                scores = torch.Tensor(scores)
+                            
                 scores = torch.nn.Softmax(dim=-1)(scores)
                 
                 # interpolation dph score
@@ -778,13 +589,5 @@ class CrossEncoder(object):
                 outputs.extend(inds.tolist())
                 output_scores.extend(scores.tolist())
 
-        #         log_progress(j, outputs) if j % 1 == 0 else None
-
-        # log_progress(j, outputs)
-        
         self.ce_cache.save_cache()
-        
-        if self.task == 'odqa':
-            return get_output_format(qas, outputs, output_scores)
-        elif self.task == 'psg':
-            return get_output_format_psg(qas, outputs)
+        return get_output_format(qas, outputs, output_scores)
