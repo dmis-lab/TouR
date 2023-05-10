@@ -359,44 +359,45 @@ def do_tour(args, mips, q_ids=None, questions=None, answers=None, titles=None, q
     new_args.save_pred = False
     new_args.aggregate = True
     em_top1, _, em_topk, _ = evaluate(new_args, mips, query_vec=query_vecs)
-    logger.info(f"Acc={em_top1:.2f} | Acc@{new_args.top_k}={em_topk:.2f}")
 
     # aggregate scores from dual-encoder and cross-encoder
-    total = len(questions)
-    pred_path = os.path.join(
-        pred_dir, os.path.splitext(os.path.basename(args.test_path))[0] + f'_{total}_top{args.top_k}.pred'
-    )
-    qas_to_rerank = load_json(pred_path)
+    if args.do_score_aggregation:
+        # load dual-encoder prediction
+        total = len(questions)
+        pred_path = os.path.join(
+            pred_dir, os.path.splitext(os.path.basename(args.test_path))[0] + f'_{total}_top{args.top_k}.pred'
+        )
+        qas_to_rerank = load_json(pred_path)
 
-    predictions = ce_model.do_rerank(
-        qas_to_rerank,
-        bsz=args.bsz,
-        fp16=True,
-        rerank_k=args.top_k
-        rerank_l=args.rerank_l,
-    )
-    
-    # Dump predictions
-    pred_dir = os.path.join(args.output_dir, 'pred')
-    if not os.path.exists(pred_dir):
-        os.makedirs(pred_dir)
-    total = len(predictions)
-    pred_path = os.path.join(
-        pred_dir, os.path.splitext(os.path.basename(args.pred_path))[0] + f'_rerank_k{args.rerank_k}_l{args.rerank_l}.pred'
-    )
-    logger.info(f'Saving custom prediction file to {pred_path}')
-    with open(pred_path, 'w') as f:
-        json.dump(predictions, f)
-        
-    try:
+        # aggregate cross-encoder scores
+        predictions = ce_model.do_rerank(
+            qas_to_rerank,
+            bsz=args.bsz,
+            fp16=True,
+            rerank_k=args.top_k,
+            rerank_l=args.rerank_l,
+        )
+            
         with open(args.test_path) as f:
             answers = {d['id']:d['answers'] for d in json.load(f)['data']}
-    except Exception:
-        with open(args.test_path) as f:
-            data = json.load(f)
-            answers = {d['id']:d['answers'] for d in json.load(f)['data']}
 
-    evaluate_prediction_rerank(predictions, answers, args)
+        em_top1 = evaluate_prediction_rerank(predictions, answers, args)
+
+    logger.info(f"Acc={em_top1:.2f} | Acc@{new_args.top_k}={em_topk:.2f}")
+
+def evaluate_prediction_rerank(predictions, answers, args):
+    # Get em/f1
+    ems = []
+    for (_, prediction) in predictions.items():
+        groundtruth = answers[prediction['q_id']]
+        if len(groundtruth)==0:
+            ems.append(0)
+            continue
+        top1_pred = prediction['prediction'][0]
+        match_fn = drqa_regex_match_score if args.regex else drqa_exact_match_score
+        ems.append(max([match_fn(top1_pred, gt) for gt in groundtruth]))
+    final_em = np.mean(ems)
+    return final_em
 
 def load_json(fi):
     logging.info(f'Loading {fi}')
@@ -463,6 +464,7 @@ if __name__ == '__main__':
     options.parser.add_argument("--pseudo_labeler_p", type=float, default=0.5)
     options.parser.add_argument("--pseudo_labeler_temp", type=float, default=1.0)
     options.parser.add_argument("--top1_earlystop", action='store_true')
+    options.parser.add_argument("--do_score_aggregation", action='store_true')
     args = options.parse()
 
     assert args.pseudo_labeler_temp > 0
