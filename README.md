@@ -1,7 +1,7 @@
 # TouR: Optimizing Test-Time Query Representations for Dense Retrieval
 
 <div align="center">
-  <img alt="TouR" src="images/tour_overview.png" width="300px">
+  <img alt="TouR" src="images/tour_overview.png" width="350px">
 </div>
 
 **TouR** optimizes instance-level query representations guided by cross-encoders at test time for dense retrieval.
@@ -61,7 +61,7 @@ CUDA_VISIBLE_DEVICES=0 python -u run_tour_densephrases.py \
 	--top_k 10 \
 	--rerank_lambda 0.1 \
 	--cuda \
-    --top1_earlystop \
+	--top1_earlystop \
 	--truecase
 ```
 
