@@ -30,34 +30,6 @@ logging.basicConfig(format='%(asctime)s - %(levelname)s - %(name)s -   %(message
                     level=logging.INFO)
 logger = logging.getLogger(__name__)
 
-def get_top_phrases(mips, q_ids, questions, answers, titles, query_encoder, tokenizer, batch_size, args):
-    # Search
-    step = batch_size
-    multivec_len = args.multivec_len
-    search_fn = mips.search
-    query2vec = get_query2vec(
-        query_encoder=query_encoder, tokenizer=tokenizer, args=args, batch_size=batch_size
-    )
-    for q_idx in tqdm(range(0, len(questions), step)):
-        outs = list(query2vec(questions[q_idx:q_idx + step]))
-        # [(len(outs), multivec_len, d)]
-        start = np.concatenate([out[0] for out in outs], 0).reshape(len(outs), multivec_len, -1)
-        # [(len(outs), multivec_len, d)] 
-        end = np.concatenate([out[1] for out in outs], 0).reshape(len(outs), multivec_len, -1)      
-        # [(len(outs), multivec_len, 2 * d)]
-        query_vec = np.concatenate([start, end], 2)                                                  
-
-        outs = search_fn(
-            query_vec,
-            q_texts=questions[q_idx:q_idx + step], nprobe=args.nprobe,
-            top_k=args.top_k, return_vecs=True,
-            max_answer_length=args.max_answer_length, aggregate=args.aggregate, agg_strat=args.agg_strat,
-        )
-        yield (
-            q_ids[q_idx:q_idx + step], questions[q_idx:q_idx + step], answers[q_idx:q_idx + step],
-            titles[q_idx:q_idx + step], outs
-        )
-
 def get_top_phrases_query_vec(mips, questions, query_vecs, args):
     # Search
     search_fn = mips.search
@@ -126,11 +98,6 @@ def annotate_phrase_vecs(mips, q_ids, questions, answers, titles, phrase_groups,
     
     # Annotate for L_phrase
     if 'phrase' in args.label_strat.split(','):
-        match_fns = [
-            drqa_regex_match_score if args.regex or ('trec' in q_id.lower()) else drqa_exact_match_score for q_id in
-            q_ids
-        ]
-
         # phrase.keys(): dict_keys(['context', 'title', 'doc_idx', 'start_pos', 'end_pos', 'start_idx', 'end_idx', 'score', 'start_vec', 'end_vec', 'answer'])
         targets = [pseudo_label_fct(phrase_group, question, is_skip) for phrase_group, question, is_skip in
                     zip(phrase_groups, questions, is_skips)]
@@ -154,7 +121,6 @@ def update_query_vec(
         start_vecs=None, end_vecs=None,
         targets=None, is_soft_label=False, 
 ):
-
     # Skip if no targets for phrases
     if start_vecs is not None:
         if all([len(t) == 0 for t in targets]):
