@@ -67,6 +67,8 @@ CUDA_VISIBLE_DEVICES=0 python -u run_tour_densephrases.py \
 
 #### Model list
 
+We have uploaded our phrase re-rankers on the Huggingface hub.
+
 - [Phrase Re-ranker for NQ|TriviaQA|SQuAD](https://huggingface.co/dmis-lab/phrase-reranker-multi)
 - [Phrase Re-ranker for WQ](https://huggingface.co/dmis-lab/phrase-reranker-multi-wq)
 - [Phrase Re-ranker for TREC](https://huggingface.co/dmis-lab/phrase-reranker-multi-trec) 
