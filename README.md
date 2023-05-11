@@ -24,6 +24,12 @@ conda activate TouR
 
 # Install DensePhrases
 python setup.py develop
+
+# Running config.sh will set the following three environment variables:
+# DATA_DIR: for datasets (including 'kilt', 'open-qa', 'single-qa', 'truecase', 'wikidump')
+# SAVE_DIR: for pre-trained models or index; new models and index will also be saved here
+# CACHE_DIR: for cache files from Huggingface Transformers
+source config.sh
 ```
 
 After installing DensePhrases, you will need to download the [resources](https://github.com/princeton-nlp/DensePhrases/tree/v1.1.0#resources) such as datasets, phrase indexes, and pre-trained models.
