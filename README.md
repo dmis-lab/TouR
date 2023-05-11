@@ -4,11 +4,11 @@
   <img alt="TouR" src="images/tour_overview.png" width="350px">
 </div>
 
-**TouR** optimizes instance-level query representations guided by cross-encoders at test time for dense retrieval.
+*TouR* optimizes instance-level query representations guided by cross-encoders at test time for dense retrieval.
 Please see our ACL findings paper [
 Optimizing Test-Time Query Representations for Dense Retrieval (Sung et al., 2023)](http://https://arxiv.org/abs/2205.12680) for more details.
 
-## **TouR** for Phrase Retrieval
+## *TouR* for Phrase Retrieval
 
 ### Installation
 
@@ -35,7 +35,7 @@ source config.sh
 After installing DensePhrases, you will need to download the [resources](https://github.com/princeton-nlp/DensePhrases/tree/v1.1.0#resources) such as datasets, phrase indexes, and pre-trained models.
 
 
-### Running **TouR**
+### Running *TouR*
 
 To run TouR for open-domain question answering, you need to execute the following script.
 The example script demonstrates applying TouR<sub>hard</sub> to the NQ testset. 
@@ -44,7 +44,7 @@ Once executed, the prediction file will be generated in $OUTPUT_DIR.
 ```
 TEST_PATH='/path/to/densephrases-data/open-qa/nq-open/nq_test_preprocessed.json'
 LOAD_DIR=princeton-nlp/densephrases-multi-query-multi
-CE_DIR='/path/to/phrase_reranker_multi' # see the model list below
+PSEUDO_LABELER_DIR='/path/to/phrase_reranker_multi' # see the model list below
 OUTPUT_DIR='/path/to/output'
 PSEUDO_LABELER_TYPE='hard' # or 'soft'
 
@@ -58,7 +58,7 @@ CUDA_VISIBLE_DEVICES=0 python -u run_tour_densephrases.py \
 	--index_name start/1048576_flat_OPQ96 \
 	--load_dir ${LOAD_DIR} \
 	--output_dir ${OUTPUT_DIR} \
-	--pseudo_labeler_name_or_path ${CE_DIR} \
+	--pseudo_labeler_name_or_path ${PSEUDO_LABELER_DIR} \
 	--pseudo_labeler_type ${PSEUDO_LABELER_TYPE} \
 	--pseudo_labeler_p 0.5 \
 	--pseudo_labeler_temp 0.5 \
@@ -74,6 +74,7 @@ CUDA_VISIBLE_DEVICES=0 python -u run_tour_densephrases.py \
 #### Model list
 
 We have uploaded our phrase re-rankers on the Huggingface hub.
+The phrase re-rankers are used as pseudo labelers for *TouR*.
 
 - [Phrase Re-ranker for NQ|TriviaQA|SQuAD](https://huggingface.co/dmis-lab/phrase-reranker-multi)
 - [Phrase Re-ranker for WQ](https://huggingface.co/dmis-lab/phrase-reranker-multi-wq)
