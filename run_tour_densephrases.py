@@ -362,29 +362,36 @@ def do_tour(args, mips, q_ids=None, questions=None, answers=None, titles=None, q
     em_top1, _, em_topk, _ = evaluate(new_args, mips, query_vec=query_vecs)
 
     # aggregate scores from dual-encoder and cross-encoder
-    if args.do_score_aggregation:
-        # load predictions from dual-encoder
-        total = len(questions)
-        pred_dir = os.path.join(args.load_dir, 'pred')
-        pred_path = os.path.join(
-            pred_dir, os.path.splitext(os.path.basename(args.test_path))[0] + f'_{total}_top{args.top_k}.pred'
-        )
-        qas_to_rerank = load_json(pred_path)
+    # load predictions from dual-encoder
+    total = len(questions)
+    pred_dir = os.path.join(args.load_dir, 'pred')
+    pred_path = os.path.join(
+        pred_dir, os.path.splitext(os.path.basename(args.test_path))[0] + f'_{total}_top{args.top_k}.pred'
+    )
+    qas_to_rerank = load_json(pred_path)
 
-        # aggregate cross-encoder scores
-        predictions = ce_model.do_rerank(
-            qas_to_rerank,
-            rerank_k=args.top_k,
-            rerank_lambda=args.rerank_lambda,
-        )
-            
-        with open(args.test_path) as f:
-            answers = {d['id']:d['answers'] for d in json.load(f)['data']}
+    # aggregate cross-encoder scores
+    predictions = ce_model.do_rerank(
+        qas_to_rerank,
+        rerank_k=args.top_k,
+        rerank_lambda=args.rerank_lambda,
+    )
+        
+    with open(args.test_path) as f:
+        answers = {d['id']:d['answers'] for d in json.load(f)['data']}
 
-        # evaluate predictions after aggregation
-        em_top1 = evaluate_prediction_rerank(predictions, answers, args)
+    # evaluate predictions after aggregation
+    em_top1 = evaluate_prediction_rerank(predictions, answers, args)
 
+    # save predictions
+    pred_path = args.test_path.split("/")[-1].replace(".json","_tour.pred")
+    pred_path = os.path.join(args.output_dir, pred_path)
+    with open(pred_path, 'w') as f:
+        json.dump(predictions, f)
+
+    logger.info(f"Finish TouR")
     logger.info(f"Acc={em_top1:.2f} | Acc@{new_args.top_k}={em_topk:.2f}")
+    logger.info(f"Predictions are saved in {pred_path}")
 
 def evaluate_prediction_rerank(predictions, answers, args):
     # Get em/f1
@@ -460,12 +467,11 @@ if __name__ == '__main__':
     options.add_data_options()
     options.add_qsft_options()
     
-    options.parser.add_argument("--pseudo_labeler_name_or_path")
+    options.parser.add_argument("--pseudo_labeler_name_or_path", help='a path for the pseudo labeler')
     options.parser.add_argument("--pseudo_labeler_type", default='hard', choices=['hard','soft'])
     options.parser.add_argument("--pseudo_labeler_p", type=float, default=0.5)
     options.parser.add_argument("--pseudo_labeler_temp", type=float, default=1.0)
     options.parser.add_argument("--top1_earlystop", action='store_true')
-    options.parser.add_argument("--do_score_aggregation", action='store_true')
     options.parser.add_argument("--rerank_lambda", type=float, default=0.1)
     args = options.parse()
 

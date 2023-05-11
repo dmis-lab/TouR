@@ -495,7 +495,7 @@ class CrossEncoder(object):
         
         return all_predictions, scores
     
-    def do_rerank(self, qas, use_cuda=True, bsz=1, rerank_lambda=1.0, rerank_k=10):
+    def do_rerank(self, qas, use_cuda=True, bsz=1, rerank_lambda=0.1, rerank_k=10):
         def forward(inputs):
             batch_size, top_k, seq_length = inputs['input_ids'].shape
             inputs['input_ids'] = inputs['input_ids'].reshape(-1, seq_length).to(self.device)
