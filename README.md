@@ -83,7 +83,7 @@ The phrase re-rankers are used as pseudo labelers for *TouR*.
 
 ## Citations
 ```bibtex
-@article{sung2023optimizing,
+@inproceedings{sung2023optimizing,
    title={Optimizing Test-Time Query Representations for Dense Retrieval},
    author={Sung, Mujeen and Park, Jungsoo and Kang, Jaewoo and Chen, Danqi and Lee, Jinhyuk},
    booktitle={Findings of Association for Computational Linguistics (ACL)},
