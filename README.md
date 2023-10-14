@@ -76,10 +76,12 @@ CUDA_VISIBLE_DEVICES=0 python -u run_tour_densephrases.py \
 We have uploaded our phrase re-rankers on the Huggingface hub.
 The phrase re-rankers are used as pseudo labelers for *TouR*.
 
-- [Phrase Re-ranker for NQ|TriviaQA|SQuAD](https://huggingface.co/dmis-lab/phrase-reranker-multi)
-- [Phrase Re-ranker for WQ](https://huggingface.co/dmis-lab/phrase-reranker-multi-wq)
-- [Phrase Re-ranker for TREC](https://huggingface.co/dmis-lab/phrase-reranker-multi-trec) 
+- [phrase-reranker-multi](https://huggingface.co/dmis-lab/phrase-reranker-multi): Phrase re-ranker trained on multiple datasets (NQ|TriviaQA|SQuAD|WQ|TREC)
+- [phrase-reranker-multi-wq](https://huggingface.co/dmis-lab/phrase-reranker-multi-wq): phrase-reranker-multi with further fine-tuning on WQ dataset
+- [phrase-reranker-multi-trec](https://huggingface.co/dmis-lab/phrase-reranker-multi-trec): phrase-reranker-multi with further fine-tuning on TREC dataset
+- [phrase-reranker-nq](https://huggingface.co/dmis-lab/phrase-reranker-nq): Phrase re-ranker trained on NQ dataset only
 
+To train phrase re-rankers, please refer to the 'cross_encoder' folder.
 
 ## Citations
 ```bibtex
