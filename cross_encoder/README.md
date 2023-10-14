@@ -1,4 +1,4 @@
-# Train phrase-ranker
+# Train phrase re-rankers
 
 First, please download the training/dev set.
 
