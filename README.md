@@ -6,7 +6,7 @@
 
 *TouR* optimizes instance-level query representations guided by cross-encoders at test time for dense retrieval.
 Please see our Findings of ACL paper [
-Optimizing Test-Time Query Representations for Dense Retrieval (Sung et al., 2023)](http://https://arxiv.org/abs/2205.12680) for more details.
+Optimizing Test-Time Query Representations for Dense Retrieval (Sung et al., 2023)](https://arxiv.org/abs/2205.12680) for more details.
 
 ## *TouR* for Phrase Retrieval
 
